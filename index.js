@@ -6254,22 +6254,10 @@ function renderPower() {
         </button>
         <span class="sd-power-hint">${settings().onlyCoop
             ? (on ? '独立 Coop：允许自动 Coop；剧情导演暂停。' : '独立 Coop：自动调用已暂停，手动 Coop 仍可使用。')
-            : (on ? '它正在自己推进：定篇章 / 开章 / 换拍 / 支线 / 插曲。' : '已关：不会自己调模型，注入与手动按钮照常。')}</span>
-        <label><input type="checkbox" class="sd-only-coop" ${settings().onlyCoop ? 'checked' : ''}> 只使用 Coop</label>`;
+            : (on ? '它正在自己推进：定篇章 / 开章 / 换拍 / 支线 / 插曲。' : '已关：不会自己调模型，注入与手动按钮照常。')}</span>`;
+    const coopToggle = panel.querySelector('.sd-only-coop');
+    if (coopToggle) coopToggle.checked = !!settings().onlyCoop;
     host.querySelector('.sd-power')?.addEventListener('click', () => { toggleMaster(); });
-    host.querySelector('.sd-only-coop')?.addEventListener('change', (event) => {
-        if (isGenerating() || storyGenerating || evaluating || namespaceOperations || coop?.job || coop?.store?.pending) {
-            event.target.checked = !!settings().onlyCoop;
-            toast('正在生成或处理剧情，请等待结束后再切换模式。', 'info');
-            return;
-        }
-        settings().onlyCoop = event.target.checked;
-        settings().tab = settings().onlyCoop ? 'coop' : 'now';
-        if (!settings().onlyCoop) registerOracleMode(oracleApi());
-        pinModeButtonFirst();
-        save(); syncMainInjection(); render();
-        if (!settings().onlyCoop) { void ensureNamespace(); void evaluateDirector(); }
-    });
     renderBusyBar();
 }
 
@@ -7310,11 +7298,27 @@ function makePanel() {
             <section class="sd-page sd-epic-tab" data-tab="epic" hidden></section>
             <section class="sd-page sd-main-tab" data-tab="main" hidden></section>
             <section class="sd-page sd-side-tab" data-tab="side" hidden></section>
-            <section class="sd-page sd-coop-tab" data-tab="coop" hidden></section>
+            <section class="sd-page sd-coop-tab" data-tab="coop" hidden>
+                <label class="sd-coop-only-control"><input type="checkbox" class="sd-only-coop"> <span>Coop 单独启用</span></label>
+                <div class="sd-coop-content"></div>
+            </section>
             <section class="sd-page sd-set-tab" data-tab="set" hidden></section>
             <section class="sd-page sd-about-tab" data-tab="about" hidden></section>
         </div>`;
     panel.querySelector('.sd-close').onclick = close;
+    panel.querySelector('.sd-only-coop')?.addEventListener('change', (event) => {
+        if (isGenerating() || storyGenerating || evaluating || namespaceOperations || coop?.job || coop?.store?.pending) {
+            event.target.checked = !!settings().onlyCoop;
+            toast('正在生成或处理剧情，请等待结束后再切换模式。', 'info');
+            return;
+        }
+        settings().onlyCoop = event.target.checked;
+        settings().tab = settings().onlyCoop ? 'coop' : 'now';
+        if (!settings().onlyCoop) registerOracleMode(oracleApi());
+        pinModeButtonFirst();
+        save(); syncMainInjection(); render();
+        if (!settings().onlyCoop) { void ensureNamespace(); void evaluateDirector(); }
+    });
     panel.querySelectorAll('.sd-tab').forEach((button) => {
         button.addEventListener('click', () => { settings().tab = button.dataset.tab; save(); renderTabs(); });
     });
@@ -7397,7 +7401,7 @@ function init() {
     makeBubble();
     makePanel();
     coop = createCoopSystem({
-        uiContainer: panel.querySelector('.sd-coop-tab'),
+        uiContainer: panel.querySelector('.sd-coop-content'),
         openPanel: () => { settings().tab = 'coop'; save(); open(); },
         ask: askCoop,
         designTemplates: async profile => designTemplates(await readOurWorldbookEntries(), profile),

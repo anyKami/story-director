@@ -55,11 +55,16 @@ function generationFixture() {
 
 function coopModeFixture({onlyCoop=false}={}) {
     const f=generationFixture(),slots={},listeners={},timers=[];
-    const power={classList:{toggle(){}},querySelector:selector=>({
-        addEventListener:(name,handler)=>{listeners[selector]=handler;},
-    })};
-    f.c.testPanel={hidden:true,querySelector:selector=>selector==='.sd-powerbar'?power:null,querySelectorAll:()=>[]};
-    f.c.document.body={};
+    const power={classList:{toggle(){}},querySelector:()=>null};
+    const coopPage={dataset:{tab:'coop'},hidden:true},coopContent={};
+    const control={checked:false,addEventListener:(name,handler)=>{listeners[name]=handler;}};
+    const elements={'.sd-powerbar':power,'.sd-coop-content':coopContent,'.sd-only-coop':control,
+        '.sd-close':{},'.sd-head':{addEventListener(){}}};
+    const panel={querySelector:selector=>elements[selector]??null,
+        querySelectorAll:selector=>selector==='.sd-page'?[coopPage]:[]};
+    const createElement=f.c.document.createElement;
+    f.c.document.createElement=tag=>tag==='aside'?panel:createElement(tag);
+    f.c.document.body={appendChild(){}};
     f.c.window.setTimeout=(fn,delay)=>timers.push({fn,delay});
     f.c.event_types.CHAT_CHANGED='chat_changed';
     f.c.event_types.WORLDINFO_ENTRIES_LOADED='worldinfo_entries_loaded';
@@ -81,23 +86,28 @@ function coopModeFixture({onlyCoop=false}={}) {
         const syncMvu=Object.assign(async()=>{syncs++;},{updateLive:()=>{}});
         return {syncMvu,occupies:()=>false,injection:()=>'<Coop>演出</Coop>',variableContract:()=>'<Coop>好感契约</Coop>'};
     };
-    f.run(`makeBubble=()=>{};makePanel=()=>{panel=testPanel};injectWandEntry=()=>{};exposeDiagnostics=()=>{};
+    f.run(`makeBubble=()=>{};injectWandEntry=()=>{};exposeDiagnostics=()=>{};
         settings().autoInstallBook=false;settings().autoUpdateBook=false;
         ${onlyCoop?'settings().onlyCoop=true;':''}
         init();renderPower();`);
     const toggle=checked=>{
-        const target={checked};listeners['.sd-only-coop']({target});return target.checked;
+        control.checked=checked;listeners.change({target:control});return control.checked;
     };
     const prompt=key=>slots[f.run('SLOT.'+key)];
     const settle=()=>new Promise(resolve=>setImmediate(resolve));
     return {...f,options,toggle,prompt,settle,syncs:()=>syncs,timers,oracleMode:()=>oracleMode,
-        modeButton,activateMode:()=>{activeMode=true;},modeClicks:()=>modeClicks};
+        modeButton,activateMode:()=>{activeMode=true;},modeClicks:()=>modeClicks,
+        panel,power,coopPage,coopContent,control};
 }
 
 test('the mode switch freezes saved story progress and leaves manual Coop and its prompts available',async()=>{
     const f=coopModeFixture();await f.settle();f.seed();
     f.run('saveStory();syncMainInjection()');
     assert.equal(f.run('settings().onlyCoop'),false);
+    assert.match(f.panel.innerHTML,/<section class="sd-page sd-coop-tab"[^>]*>\s*<label[^>]*>.*class="sd-only-coop".*Coop 单独启用/);
+    assert.equal(f.panel.innerHTML.match(/class="sd-only-coop"/g)?.length,1);
+    assert.doesNotMatch(f.power.innerHTML,/sd-only-coop/);
+    assert.equal(f.options.uiContainer,f.coopContent);
     assert.ok(f.oracleMode());
     assert.match(f.prompt('main'),/当前章/);
     f.c.isGenerating=()=>true;
@@ -113,6 +123,11 @@ test('the mode switch freezes saved story progress and leaves manual Coop and it
     assert.equal(f.modeButton.hidden,true);
     assert.equal(f.modeClicks(),1);
     assert.equal(f.run('settings().tab'),'coop');
+    assert.equal(f.coopPage.hidden,false);
+    f.coopContent.innerHTML='<div>Coop 面板刷新</div>';
+    f.control.checked=false;
+    f.run('render()');
+    assert.equal(f.control.checked,true);
     assert.equal(f.prompt('main'),'');
     assert.equal(f.prompt('contract'),'<Coop>好感契约</Coop>');
     assert.equal(f.prompt('coop'),'<Coop>演出</Coop>');
@@ -131,6 +146,7 @@ test('the mode switch freezes saved story progress and leaves manual Coop and it
     assert.equal(f.run('JSON.stringify(settings().story)'),story);
     assert.equal(f.toggle(false),false);
     assert.equal(f.run('settings().onlyCoop'),false);
+    assert.equal(f.coopPage.hidden,true);
     assert.equal(f.modeButton.hidden,false);
     assert.match(f.prompt('main'),/当前章/);
     await f.settle();
