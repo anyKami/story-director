@@ -27,10 +27,18 @@ export class CoopStore {
     }
     project(document=this.document) {
         if(document.journal.some(op=>op.confirmed===undefined)) {
-            // 首次升级固定旧档当前有效分支，保留已废弃记录供诊断，不复活早先被替换的计划。
-            const applied=new Set(project(document,this.sources({legacyStatus:true})).applied);
-            for(const op of document.journal) if(op.confirmed===undefined) op.confirmed=applied.has(op.id);
-            this.confirmationMigration=true;
+            const sources=this.sources({legacyStatus:true});
+            // A missing source, even on a confirmed predecessor, can invalidate
+            // later operations. Wait for all sources before pinning legacy branches.
+            const incomplete=document.journal.some(op=>op.confirmed!==false &&
+                (op.refs || []).some(ref=>!sources.has(ref.id)));
+            // Pending deletions own their captured legacy classification.
+            if(!incomplete && !this.eventPruneBatch?.confirmations.size) {
+                // 首次升级固定旧档当前有效分支，保留已废弃记录供诊断，不复活早先被替换的计划。
+                const applied=new Set(project(document,sources).applied);
+                for(const op of document.journal) if(op.confirmed===undefined) op.confirmed=applied.has(op.id);
+                this.confirmationMigration=true;
+            }
         }
         const state=project(document,this.sources());
         return this.host.projectState?.(state) || state;
@@ -93,25 +101,38 @@ export class CoopStore {
     }
     pruneEvents() {
         if(!this.document || this.readonly || this.scope!==this.host.scope()) return Promise.resolve([]);
-        const captured=deletedEventIds(this.document,sourceMap(this.host.messages()));
-        if(!captured.size) return this.eventPruneTask || Promise.resolve([]);
-        const batch=this.eventPruneBatch || (this.eventPruneBatch={scope:this.scope,generation:this.generation,ids:new Set(),task:null});
+        const messages=this.host.messages(),captured=deletedEventIds(this.document,sourceMap(messages));
+        const legacy=this.document.journal.filter(op=>op.confirmed===undefined),confirmations=new Map();
+        if(legacy.length) {
+            // Explicit deletion is authoritative. Capture migration before queued
+            // saves can observe a different, possibly incomplete message array.
+            const applied=new Set(project(this.document,sourceMap(messages,{legacyStatus:true})).applied);
+            for(const op of legacy) confirmations.set(op.id,applied.has(op.id));
+        }
+        if(!captured.size && !confirmations.size) return this.eventPruneTask || Promise.resolve([]);
+        const batch=this.eventPruneBatch || (this.eventPruneBatch={scope:this.scope,generation:this.generation,ids:new Set(),confirmations:new Map(),task:null});
         for(const id of captured) batch.ids.add(id);
+        for(const [id,confirmed] of confirmations) if(!batch.confirmations.has(id)) batch.confirmations.set(id,confirmed);
         return this.flushEventPrunes(batch);
     }
     flushEventPrunes(batch=this.eventPruneBatch) {
         if(batch?.task) return batch.task;
         const current=()=>batch && this.eventPruneBatch===batch && batch.scope===this.scope && batch.scope===this.host.scope() && batch.generation===this.generation;
-        if(!current() || !batch.ids.size || this.readonly || this.pending && this.error) return Promise.resolve([]);
+        const hasWork=()=>batch.ids.size || batch.confirmations.size;
+        if(!current() || !hasWork() || this.readonly || this.pending && this.error) return Promise.resolve([]);
         let failed=false;
         const task=(async()=>{
             const removed=[];
-            while(current() && batch.ids.size && !this.readonly && !(this.pending && this.error)) {
-                const captured=new Set(batch.ids);
+            while(current() && hasWork() && !this.readonly && !(this.pending && this.error)) {
+                const captured=new Set(batch.ids),confirmations=new Map(batch.confirmations);
                 try {
-                    const pruned=await this.enqueue(document=>pruneEventIds(document,captured));
+                    const pruned=await this.enqueue(document=>{
+                        for(const op of document.journal) if(op.confirmed===undefined && confirmations.has(op.id)) op.confirmed=confirmations.get(op.id);
+                        return pruneEventIds(document,captured);
+                    });
                     if(!current()) break;
                     for(const id of captured) batch.ids.delete(id);
+                    for(const id of confirmations.keys()) batch.confirmations.delete(id);
                     removed.push(...pruned);
                 } catch {failed=true;break;}
             }
@@ -120,7 +141,7 @@ export class CoopStore {
             if(batch.task===task) batch.task=null;
             if(this.eventPruneTask===task) this.eventPruneTask=null;
             // Only drain another explicitly captured request; never rescan a transient chat here.
-            if(!failed && current() && batch.ids.size && !this.readonly && !this.pending && !this.error) return this.flushEventPrunes(batch);
+            if(!failed && current() && hasWork() && !this.readonly && !this.pending && !this.error) return this.flushEventPrunes(batch);
         });
         batch.task=task;this.eventPruneTask=task;
         return task;

@@ -26,13 +26,20 @@ function holdSave(host) {
     return {entered:entered.promise,finish:finished.resolve,fail:finished.reject};
 }
 
-test('legacy migration pins its current valid branch and never revives superseded records after edits',async()=>{
+for(const gap of [false,true]) test('legacy migration pins its current valid branch and never revives superseded records after edits, gap='+gap,async()=>{
     const h=await setup();await h.score();
     const legacy=clone(h.metadata[STORAGE_KEY]),abandoned=clone(legacy.journal[0]);
     delete legacy.journal[0].confirmed;delete abandoned.confirmed;
     abandoned.id='superseded-score';abandoned.data.interactionId='discarded-interaction';
     abandoned.refs[0].version='not-the-confirmed-source';legacy.journal.push(abandoned);
-    h.metadata[STORAGE_KEY]=legacy;h.store.load();
+    h.metadata[STORAGE_KEY]=legacy;
+    if(gap) {
+        const removed=h.messages.pop();h.store.load();
+        await h.store.enqueue(()=>{});
+        assert.deepEqual(h.metadata[STORAGE_KEY].journal.map(op=>op.confirmed),[undefined,undefined]);
+        h.messages.push(removed);
+    }
+    h.store.load();
     assert.deepEqual(h.store.document.journal.map(op=>op.confirmed),[true,false]);
     assert.equal(h.store.state.profiles.a.affinity,30);
     await h.store.enqueue(()=>{});
@@ -40,6 +47,18 @@ test('legacy migration pins its current valid branch and never revives supersede
     assert.equal(h.store.state.profiles.a.affinity,30);
     assert.equal(h.store.state.skipped.find(op=>op.id==='superseded-score').code,'SUPERSEDED');
     h.messages.pop();h.store.reconcile();assert.equal(h.store.state.profiles.a.affinity,29);
+});
+
+test('missing references on already superseded records do not block legacy migration',async()=>{
+    const h=await setup();await h.score();
+    const legacy=clone(h.metadata[STORAGE_KEY]),abandoned=clone(legacy.journal[0]);
+    delete legacy.journal[0].confirmed;
+    abandoned.id='superseded-score';abandoned.confirmed=false;
+    abandoned.refs=[{id:'removed-source',version:'old-version'}];legacy.journal.unshift(abandoned);
+    h.metadata[STORAGE_KEY]=legacy;h.store.load();await h.store.enqueue(()=>{});
+    assert.deepEqual(h.metadata[STORAGE_KEY].journal.map(op=>op.confirmed),[false,true]);
+    assert.equal(h.store.state.profiles.a.affinity,30);
+    assert.deepEqual(h.store.state.skipped,[{id:abandoned.id,code:'SUPERSEDED'}]);
 });
 for(const change of ['edit','delete','swipe','exclude']) test('save confirmation rechecks current sources after '+change,async()=>{
     const h=await setup(),save=holdSave(h.host),published=[];

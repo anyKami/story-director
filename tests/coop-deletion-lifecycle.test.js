@@ -77,9 +77,40 @@ for(const missing of ['all','origin']) test('a same-chat temporary '+missing+' m
     assert.equal(h.profile().events[h.eventId].phase,'completed');assert.equal(h.profile().affinity,15);
 });
 
-test('an explicit deleted origin floor permanently prunes its event through bootstrap',async t=>{
+for(const [missing,mixed] of [['all',false],['origin',false],['closing',false],['origin',true]]) test(
+    'legacy migration survives a temporary '+missing+' message gap'+(mixed?' with confirmed predecessors':''),async t=>{
+    const h=await fixture(t),original=h.messages.slice(),history=clone(h.profile().history);
+    const legacy=clone(h.metadata[STORAGE_KEY]);
+    for(const op of legacy.journal) if(!mixed || op.kind==='beat') delete op.confirmed;
+    h.metadata[STORAGE_KEY]=legacy;
+    if(missing==='all') h.messages.splice(0);
+    else if(missing==='origin') h.messages.splice(h.messages.findIndex(message=>message.sd_coop_id===h.profile().events[h.eventId].createdAt.id),1);
+    else h.messages.pop();
+    await h.emit('CHAT_CHANGED');
+    const duringGap={document:clone(h.runtime.store.document),persisted:clone(h.metadata[STORAGE_KEY]),
+        migration:h.runtime.store.confirmationMigration};
+    h.messages.splice(0,h.messages.length,...original);await h.emit('MESSAGE_EDITED');
+    const restoredRank=h.profile().rank;
+    await h.emit('CHAT_CHANGED');
+    assert.equal(h.profile().rank,1,'reloading restored messages must recover the completed Rank');
+    assert.equal(restoredRank,1,'reconciling restored messages must recover the completed Rank');
+    assert.deepEqual(h.profile().history,history);
+    assert.equal(h.profile().events[h.eventId].phase,'completed');assert.equal(h.profile().affinity,15);
+    assert.deepEqual(duringGap.document.journal,legacy.journal,'missing sources must not classify legacy operations');
+    assert.deepEqual(duringGap.persisted,legacy,'loading incomplete messages must not save a migration');
+    assert.equal(duringGap.migration,false);
+    assert.ok(h.metadata[STORAGE_KEY].journal.every(op=>op.confirmed===true));
+    h.messages.at(-1).mes='玩家编辑后的收束正文。';await h.emit('CHAT_CHANGED');
+    assert.equal(h.profile().rank,1);assert.equal(h.profile().history[0].summary,history[0].summary);
+});
+
+for(const legacy of [false,true]) test('an explicit deleted origin floor permanently prunes its event through bootstrap, legacy='+legacy,async t=>{
     const h=await fixture(t),original=h.messages.slice(),origin=h.profile().events[h.eventId].createdAt.id;
     h.messages.splice(h.messages.findIndex(message=>message.sd_coop_id===origin),1);
+    if(legacy) {
+        for(const op of h.metadata[STORAGE_KEY].journal) delete op.confirmed;
+        await h.emit('CHAT_CHANGED');
+    }
     await h.emit('MESSAGE_DELETED');
     assert.equal(h.profile().rank,0);assert.equal(h.profile().history.length,0);
     assert.equal(h.profile().events[h.eventId],undefined);
@@ -89,14 +120,54 @@ test('an explicit deleted origin floor permanently prunes its event through boot
     assert.equal(h.profile().rank,0);assert.equal(h.profile().events[h.eventId],undefined);
 });
 
-test('deleting only the closing reply rolls back promotion and retains the unfinished event',async t=>{
+for(const legacy of [false,true]) test('deleting only the closing reply rolls back promotion and retains the unfinished event, legacy='+legacy,async t=>{
     const h=await fixture(t);
-    h.messages.pop();await h.emit('MESSAGE_DELETED');
+    h.messages.pop();
+    if(legacy) {
+        for(const op of h.metadata[STORAGE_KEY].journal) delete op.confirmed;
+        await h.emit('CHAT_CHANGED');
+    }
+    await h.emit('MESSAGE_DELETED');
     assert.equal(h.profile().rank,0);assert.equal(h.profile().history.length,0);
     assert.equal(h.runtime.event().id,h.eventId);assert.equal(h.runtime.event().phase,'resolution');
     assert.ok(h.runtime.store.document.journal.some(operation=>operation.kind==='plan' && operation.data.eventId===h.eventId));
     await h.emit('CHAT_CHANGED');
     assert.equal(h.profile().rank,0);assert.equal(h.runtime.event().id,h.eventId);
+    const hook=h.profile().events[h.eventId].progress.find(step=>step.phase==='hook').source.id;
+    h.messages.find(message=>message.sd_coop_id===hook).mes='玩家编辑了仍然保留的开场。';
+    await h.emit('MESSAGE_EDITED');await h.emit('CHAT_CHANGED');
+    assert.equal(h.runtime.event().phase,'resolution','editing a retained floor must preserve the remaining progress');
+});
+
+for(const gap of ['empty','restored']) test('queued legacy deletion uses its captured sources when messages become '+gap,async t=>{
+    const h=await fixture(t),original=h.messages.slice();
+    for(const op of h.metadata[STORAGE_KEY].journal) delete op.confirmed;
+    h.messages.pop();const retained=h.messages.slice();await h.emit('CHAT_CHANGED');
+    let release,entered;
+    const ready=new Promise(resolve=>{entered=resolve;}),gate=new Promise(resolve=>{release=resolve;});
+    const saving=h.runtime.store.enqueue(async()=>{entered();await gate;});await ready;
+    const deleted=h.emit('MESSAGE_DELETED');
+    h.messages.splice(0,h.messages.length,...(gap==='restored'?original:[]));
+    release();await saving;await deleted;
+    const flags=h.metadata[STORAGE_KEY].journal.map(op=>op.confirmed);
+    assert.deepEqual(flags,[true,true,true,true,true,false]);
+    h.messages.splice(0,h.messages.length,...retained);await h.emit('CHAT_CHANGED');
+    assert.equal(h.profile().rank,0);assert.equal(h.runtime.event().phase,'resolution');
+});
+
+test('legacy deletion confirmation survives a failed save and a transient gap during retry',async t=>{
+    const h=await fixture(t),host=h.runtime.host,persist=host.persist;
+    for(const op of h.metadata[STORAGE_KEY].journal) delete op.confirmed;
+    h.messages.pop();await h.emit('CHAT_CHANGED');
+    host.persist=async()=>{throw new Error('offline');};await h.emit('MESSAGE_DELETED');
+    assert.ok(h.runtime.store.pending);assert.ok(h.runtime.store.error);
+    assert.ok(h.metadata[STORAGE_KEY].journal.every(op=>op.confirmed===undefined));
+    const retained=h.messages.splice(0);host.persist=persist;
+    await h.runtime.store.retrySave();
+    assert.deepEqual(h.metadata[STORAGE_KEY].journal.map(op=>op.confirmed),[true,true,true,true,true,false]);
+    assert.equal(h.runtime.store.pending,null);assert.equal(h.runtime.store.error,null);
+    h.messages.push(...retained);await h.emit('CHAT_CHANGED');
+    assert.equal(h.profile().rank,0);assert.equal(h.runtime.event().phase,'resolution');
 });
 
 test('a deletion notification captures its own scope before later transient chat changes',async t=>{
